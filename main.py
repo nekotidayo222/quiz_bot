@@ -3,122 +3,150 @@ from discord.ext import commands
 from discord import app_commands
 import json
 import os
-import random
 
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.guilds = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-QUIZ_FILE = "quiz.json"
-QUIZ3_FILE = "3quiz.json"
-
-
-def load_json(filename):
-    if not os.path.exists(filename):
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump([], f, ensure_ascii=False, indent=2)
-    with open(filename, "r", encoding="utf-8") as f:
-        return json.load(f)
-
+# ===== JSON 読み書き =====
+def load_json(filename, default):
+    try:
+        with open(filename, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return default
 
 def save_json(filename, data):
     with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
+global_data = load_json("global.json", {"channels": []})
+shogo_data = load_json("shogo.json", {})
 
+# ===== 起動 =====
 @bot.event
 async def on_ready():
-    print(f"✅ Bot logged in as {bot.user}")
+    print(f"✅ Logged in as {bot.user}")
     try:
-        synced = await bot.tree.sync()
-        print(f"🔧 Synced {len(synced)} commands")
+        await bot.tree.sync()
+        print("✅ Slash commands synced")
     except Exception as e:
         print(f"❌ Sync error: {e}")
 
+# ===== コマンド =====
 
-# -------------------- /quiz --------------------
-@bot.tree.command(name="quiz", description="quiz.jsonからクイズを出題 (記述式)")
-async def quiz(interaction: discord.Interaction):
-    quiz_data = load_json(QUIZ_FILE)
-    if not quiz_data:
-        await interaction.response.send_message("❌ クイズがまだありません。")
-        return
-
-    q = random.choice(quiz_data)
-    await interaction.response.send_message(f"📝 問題: {q['question']}")
-
-    def check(msg: discord.Message):
-        return msg.author.id == interaction.user.id and msg.channel == interaction.channel
-
-    try:
-        msg = await bot.wait_for("message", timeout=30.0, check=check)
-    except:
-        await interaction.followup.send("⌛ 時間切れ！")
-        return
-
-    if msg.content.strip().lower() == q["answer"].lower():
-        await interaction.followup.send("⭕ 正解！")
+# /setup
+@bot.tree.command(name="setup", description="このチャンネルをグローバルチャットに設定します")
+async def setup(interaction: discord.Interaction):
+    channel_id = interaction.channel.id
+    if channel_id not in global_data["channels"]:
+        global_data["channels"].append(channel_id)
+        save_json("global.json", global_data)
+        await interaction.response.send_message("✅ このチャンネルをグローバルチャットに設定しました", ephemeral=True)
     else:
-        await interaction.followup.send(f"❌ 不正解！正解は `{q['answer']}` です。")
+        await interaction.response.send_message("⚠️ すでに設定されています", ephemeral=True)
 
-
-# -------------------- /quiz-set --------------------
-@bot.tree.command(name="quiz-set", description="quiz.jsonにクイズを追加 (管理者のみ)")
-async def quiz_set(interaction: discord.Interaction, question: str, answer: str):
+# /shogo-set
+@bot.tree.command(name="shogo-set", description="ユーザーに二つ名を設定 (管理者専用)")
+@app_commands.describe(userid="ユーザーID", content="二つ名")
+async def shogo_set(interaction: discord.Interaction, userid: str, content: str):
     if interaction.user.id != ADMIN_ID:
-        await interaction.response.send_message("❌ このコマンドは管理者のみ使用できます。", ephemeral=True)
+        await interaction.response.send_message("❌ 権限がありません", ephemeral=True)
         return
 
-    quiz_data = load_json(QUIZ_FILE)
-    quiz_data.append({"question": question, "answer": answer})
-    save_json(QUIZ_FILE, quiz_data)
-    await interaction.response.send_message(f"✅ クイズを追加しました！\nQ: {question}\nA: {answer}")
+    shogo_data[userid] = content
+    save_json("shogo.json", shogo_data)
+    await interaction.response.send_message(f"✅ <@{userid}> に二つ名「{content}」を設定しました", ephemeral=True)
 
+# /serverlist
+@bot.tree.command(name="serverlist", description="導入サーバー一覧を表示 (実行者のみ閲覧可)")
+async def serverlist(interaction: discord.Interaction):
+    embed_color = discord.Color.red() if interaction.user.id == ADMIN_ID else discord.Color.white()
+    embed = discord.Embed(title="🌍 導入サーバー一覧", color=embed_color)
 
-# -------------------- /3quiz --------------------
-@bot.tree.command(name="3quiz", description="3quiz.jsonから3択クイズを出題")
-async def quiz3(interaction: discord.Interaction):
-    quiz_data = load_json(QUIZ3_FILE)
-    if not quiz_data:
-        await interaction.response.send_message("❌ 3択クイズがまだありません。")
-        return
+    setup_servers = []
+    not_setup_servers = []
 
-    q = random.choice(quiz_data)
-    question = q["question"]
-    answer = q["answer"]
-    choices = [answer, q["dummy1"], q["dummy2"]]
-    random.shuffle(choices)
+    for guild in bot.guilds:
+        owner = await bot.fetch_user(guild.owner_id)
+        try:
+            invite = await list(guild.text_channels)[0].create_invite(max_age=0, max_uses=0)
+            invite_link = invite.url
+        except:
+            invite_link = "招待リンクを作成できませんでした"
 
-    view = discord.ui.View()
-    for choice in choices:
-        async def button_callback(interact: discord.Interaction, choice=choice):
-            if choice == answer:
-                await interact.response.send_message("⭕ 正解！", ephemeral=True)
-            else:
-                await interact.response.send_message(f"❌ 不正解！正解は `{answer}` です。", ephemeral=True)
+        # setup済みかどうか判定
+        is_setup = any(cid in [c.id for c in guild.text_channels] for cid in global_data["channels"])
 
-        button = discord.ui.Button(label=choice, style=discord.ButtonStyle.primary)
-        button.callback = button_callback
-        view.add_item(button)
+        entry = f"所有者: {owner}\n招待: {invite_link}"
+        if is_setup:
+            setup_servers.append((guild.name, entry))
+        else:
+            not_setup_servers.append((guild.name, entry))
 
-    await interaction.response.send_message(f"📝 問題: {question}", view=view)
+    if setup_servers:
+        embed.add_field(name="✅ グローバルチャット登録済み", value="\n\n".join([f"**{name}**\n{info}" for name, info in setup_servers]), inline=False)
+    if not_setup_servers:
+        embed.add_field(name="⚪ 未登録サーバー", value="\n\n".join([f"**{name}**\n{info}" for name, info in not_setup_servers]), inline=False)
 
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# -------------------- /3quiz-set --------------------
-@bot.tree.command(name="3quiz-set", description="3quiz.jsonに3択クイズを追加 (管理者のみ)")
-async def quiz3_set(interaction: discord.Interaction, question: str, answer: str, dummy1: str, dummy2: str):
+# /warn
+@bot.tree.command(name="warn", description="ユーザーにDMで警告を送信 (管理者専用)")
+@app_commands.describe(userid="ユーザーID", content="警告内容")
+async def warn(interaction: discord.Interaction, userid: str, content: str):
     if interaction.user.id != ADMIN_ID:
-        await interaction.response.send_message("❌ このコマンドは管理者のみ使用できます。", ephemeral=True)
+        await interaction.response.send_message("❌ 権限がありません", ephemeral=True)
         return
 
-    quiz_data = load_json(QUIZ3_FILE)
-    quiz_data.append({"question": question, "answer": answer, "dummy1": dummy1, "dummy2": dummy2})
-    save_json(QUIZ3_FILE, quiz_data)
-    await interaction.response.send_message(
-        f"✅ 3択クイズを追加しました！\nQ: {question}\nA: {answer}\n選択肢: {answer}, {dummy1}, {dummy2}"
-    )
+    user = await bot.fetch_user(int(userid))
+    try:
+        await user.send(f"⚠️ 警告: {content}")
+        await interaction.response.send_message(f"✅ <@{userid}> に警告を送信しました", ephemeral=True)
+    except:
+        await interaction.response.send_message("❌ DMを送信できませんでした", ephemeral=True)
 
+# ====== グローバルチャット転送 ======
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if message.channel.id in global_data["channels"]:
+        shogo = shogo_data.get(str(message.author.id), "")
+        shogo_display = f"《{shogo}》" if shogo else ""
+
+        content = message.content if message.content else "[添付のみ]"
+
+        embed = discord.Embed(
+            description=content,
+            color=discord.Color.blue()
+        )
+        embed.set_author(
+            name=f"{message.guild.name}: {shogo_display}{message.author.display_name}[{message.author.name}]",
+            icon_url=message.author.display_avatar.url
+        )
+
+        files = []
+        for attachment in message.attachments:
+            try:
+                file = await attachment.to_file()
+                files.append(file)
+            except:
+                pass
+
+        for channel_id in global_data["channels"]:
+            if channel_id != message.channel.id:
+                channel = bot.get_channel(channel_id)
+                if channel:
+                    await channel.send(embed=embed, files=files)
+
+    await bot.process_commands(message)
 
 bot.run(TOKEN)
